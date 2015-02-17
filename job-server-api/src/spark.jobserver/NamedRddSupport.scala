@@ -22,7 +22,7 @@ trait NamedRdds {
   val defaultTimeout = akka.util.Timeout(Duration(60, java.util.concurrent.TimeUnit.SECONDS))
 
   // Default level to cache RDDs at.
-  val defaultStorageLevel = StorageLevel.MEMORY_AND_DISK_SER
+  val defaultStorageLevel = StorageLevel.MEMORY_AND_DISK
 
   /**
    * Gets an RDD with the given name, or creates it if one doesn't already exist.
