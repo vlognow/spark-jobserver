@@ -8,7 +8,7 @@ APP_GROUP=ubuntu
 INSTALL_DIR=/home/ubuntu/job-server
 LOG_DIR=/mnt/logs/job-server
 PIDFILE=spark-jobserver.pid
-SPARK_HOME=/home/ubuntu/spark-1.2.0
+SPARK_HOME=/home/ubuntu/spark-1.2.1
 SPARK_CONF_DIR=$SPARK_HOME/conf
 # Only needed for Mesos deploys
 #SPARK_EXECUTOR_URI=/home/spark/spark-0.8.0.tar.gz
