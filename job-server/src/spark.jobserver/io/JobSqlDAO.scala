@@ -3,22 +3,32 @@ package spark.jobserver.io
 import com.typesafe.config.{ConfigRenderOptions, Config, ConfigFactory}
 import java.io.{FileOutputStream, BufferedOutputStream, File}
 import java.sql.Timestamp
+import javax.sql.DataSource
+import org.flywaydb.core.Flyway
 import org.joda.time.DateTime
 import org.slf4j.LoggerFactory
-import scala.slick.jdbc.meta.MTable
-
+import scala.slick.driver.JdbcProfile
+import scala.reflect.runtime.universe
+import org.apache.commons.dbcp.BasicDataSource
 
 class JobSqlDAO(config: Config) extends JobDAO {
-  import scala.slick.driver.H2Driver.simple._
+  val slickDriverClass = config.getString("spark.jobserver.sqldao.slick-driver")
+  val jdbcDriverClass = config.getString("spark.jobserver.sqldao.jdbc-driver")
+
+  val runtimeMirror = universe.runtimeMirror(getClass.getClassLoader)
+  val profileModule = runtimeMirror.staticModule(slickDriverClass)
+  val profile = runtimeMirror.reflectModule(profileModule).instance.asInstanceOf[JdbcProfile]
+  import profile.simple._
 
   private val logger = LoggerFactory.getLogger(getClass)
 
-  private val rootDir = getOrElse(config.getString("spark.jobserver.sqldao.rootdir"),
-    "/tmp/spark-jobserver/sqldao/data")
+  // NOTE: below is only needed for H2 drivers
+  private val rootDir = config.getString("spark.jobserver.sqldao.rootdir")
   private val rootDirFile = new File(rootDir)
   logger.info("rootDir is " + rootDirFile.getAbsolutePath)
 
   // Definition of the tables
+  //scalastyle:off
   class Jars(tag: Tag) extends Table[(Int, String, Timestamp, Array[Byte])](tag, "JARS") {
     def jarId = column[Int]("JAR_ID", O.PrimaryKey, O.AutoInc)
     def appName = column[String]("APP_NAME")
@@ -49,12 +59,37 @@ class JobSqlDAO(config: Config) extends JobDAO {
     def jobConfig = column[String]("JOB_CONFIG")
     def * = (jobId, jobConfig)
   }
+  //scalastyle:on
   val configs = TableQuery[Configs]
 
   // DB initialization
-  val defaultJdbcUrl = "jdbc:h2:file:" + rootDir + "/h2-db"
-  val jdbcUrl = getOrElse(config.getString("spark.jobserver.sqldao.jdbc.url"), defaultJdbcUrl)
-  val db = Database.forURL(jdbcUrl, driver = "org.h2.Driver")
+  val jdbcUrl = config.getString("spark.jobserver.sqldao.jdbc.url")
+  val jdbcUser = config.getString("spark.jobserver.sqldao.jdbc.user")
+  val jdbcPassword = config.getString("spark.jobserver.sqldao.jdbc.password")
+  val enableDbcp = config.getBoolean("spark.jobserver.sqldao.dbcp.enabled")
+  val db = if (enableDbcp) {
+    logger.info("DBCP enabled")
+    val dbcpMaxActive = config.getInt("spark.jobserver.sqldao.dbcp.maxactive")
+    val dbcpMaxIdle = config.getInt("spark.jobserver.sqldao.dbcp.maxidle")
+    val dbcpInitialSize = config.getInt("spark.jobserver.sqldao.dbcp.initialsize")
+    val dataSource: DataSource = {
+      val ds = new BasicDataSource
+      ds.setDriverClassName(jdbcDriverClass)
+      ds.setUsername(jdbcUser)
+      ds.setPassword(jdbcPassword)
+      ds.setMaxActive(dbcpMaxActive)
+      ds.setMaxIdle(dbcpMaxIdle)
+      ds.setInitialSize(dbcpInitialSize)
+      ds.setUrl(jdbcUrl)
+      ds
+    }
+    Database.forDataSource(dataSource)
+  } else {
+    logger.info("DBCP disabled")
+    Database.forURL(jdbcUrl, driver = jdbcDriverClass, user = jdbcUser, password = jdbcPassword)
+  }
+  // TODO: migrateLocations should be removed when tests have a running configuration
+  val migrateLocations = config.getString("flyway.locations")
 
   // Server initialization
   init()
@@ -67,37 +102,13 @@ class JobSqlDAO(config: Config) extends JobDAO {
       }
     }
 
-    // Create the tables if they don't exist
-    db withSession {
-      implicit session =>
-
-        if (isAllTablesNotExist()) {
-          // All tables don't exist. It's the first time the Job Server runs. So, create all tables.
-          logger.info("Creating JARS, CONFIGS and JOBS tables ...")
-          jars.ddl.create
-          configs.ddl.create
-          jobs.ddl.create
-        } else if (isSomeTablesNotExist()) {
-          // Only some tables exist, not all. It means there is data corruption in the metadata-store.
-          // Exit the Job Server now.
-          throw new RuntimeException("Some tables in metadata-store are missing. Please recover it first.")
-        }
-
-        // If the cases above are not true, it means all tables exit. No need to initialize the database.
-    }
+    // Flyway migration
+    val flyway = new Flyway()
+    flyway.setDataSource(jdbcUrl, jdbcUser, jdbcPassword)
+    // TODO: flyway.setLocations(migrateLocations) should be removed when tests have a running configuration
+    flyway.setLocations(migrateLocations)
+    flyway.migrate()
   }
-
-  // Check if a single exist
-  private def isTableExist(tableName: String)(implicit session: Session): Boolean =
-    !MTable.getTables(tableName).list().isEmpty
-
-  // Check if "all tables don't exist" is true
-  private def isAllTablesNotExist()(implicit session: Session): Boolean =
-    !isTableExist("JARS") && !isTableExist("CONFIGS") && !isTableExist("JOBS")
-
-  // Check if "some tables don't exist" is true
-  private def isSomeTablesNotExist()(implicit session: Session): Boolean =
-    !isTableExist("JARS") || !isTableExist("CONFIGS") || !isTableExist("JOBS")
 
   override def saveJar(appName: String, uploadTime: DateTime, jarBytes: Array[Byte]) {
     // The order is important. Save the jar file first and then log it into database.
@@ -252,7 +263,7 @@ class JobSqlDAO(config: Config) extends JobDAO {
     }
   }
 
-  override def getJobInfos: Map[String, JobInfo] = {
+  override def getJobInfos(limit: Int): Seq[JobInfo] = {
     db withSession {
       implicit sessions =>
 
@@ -262,17 +273,42 @@ class JobSqlDAO(config: Config) extends JobDAO {
           j <- jobs if j.jarId === jar.jarId
         } yield
           (j.jobId, j.contextName, jar.appName, jar.uploadTime, j.classPath, j.startTime, j.endTime, j.error)
-
+        val sortQuery = joinQuery.sortBy(_._6.desc)
+        val limitQuery = sortQuery.take(limit)
         // Transform the each row of the table into a map of JobInfo values
+        limitQuery.list.map {
+          case (id, context, app, upload, classpath, start, end, err) =>
+            JobInfo(id,
+              context,
+              JarInfo(app, convertDateSqlToJoda(upload)),
+              classpath,
+              convertDateSqlToJoda(start),
+              end.map(convertDateSqlToJoda(_)),
+              err.map(new Throwable(_)))
+        }.toSeq
+    }
+  }
+
+  override def getJobInfo(jobId: String): Option[JobInfo] = {
+    db withSession {
+      implicit sessions =>
+
+        // Join the JARS and JOBS tables without unnecessary columns
+        val joinQuery = for {
+          jar <- jars
+          j <- jobs if j.jarId === jar.jarId && j.jobId === jobId
+        } yield
+          (j.jobId, j.contextName, jar.appName, jar.uploadTime, j.classPath, j.startTime,
+            j.endTime, j.error)
         joinQuery.list.map { case (id, context, app, upload, classpath, start, end, err) =>
-          id -> JobInfo(id,
+          JobInfo(id,
             context,
             JarInfo(app, convertDateSqlToJoda(upload)),
             classpath,
             convertDateSqlToJoda(start),
             end.map(convertDateSqlToJoda(_)),
             err.map(new Throwable(_)))
-        }.toMap
+        }.headOption
     }
   }
 }

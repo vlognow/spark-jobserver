@@ -16,12 +16,12 @@ class InMemoryDAO extends JobDAO {
     jars((appName, uploadTime)) = jarBytes
   }
 
-  def getApps(): Map[String, DateTime] = {
+  def getApps: Map[String, DateTime] = {
     jars.keys
       .groupBy(_._1)
       .map { case (appName, appUploadTimeTuples) =>
         appName -> appUploadTimeTuples.map(_._2).toSeq.head
-      }.toMap
+      }
   }
 
   def retrieveJarFile(appName: String, uploadTime: DateTime): String = {
@@ -34,18 +34,20 @@ class InMemoryDAO extends JobDAO {
     } finally {
       bos.close()
     }
-    outFile.getAbsolutePath()
+    outFile.getAbsolutePath
   }
 
   val jobInfos = mutable.HashMap.empty[String, JobInfo]
 
   def saveJobInfo(jobInfo: JobInfo) { jobInfos(jobInfo.jobId) = jobInfo }
 
-  def getJobInfos(): Map[String, JobInfo] = jobInfos.toMap
+  def getJobInfos(limit: Int): Seq[JobInfo] = jobInfos.values.toSeq.sortBy(_.startTime.toString()).take(limit)
+
+  def getJobInfo(jobId: String): Option[JobInfo] = jobInfos.get(jobId)
 
   val jobConfigs = mutable.HashMap.empty[String, Config]
 
   def saveJobConfig(jobId: String, jobConfig: Config) { jobConfigs(jobId) = jobConfig }
 
-  def getJobConfigs(): Map[String, Config] = jobConfigs.toMap
+  def getJobConfigs: Map[String, Config] = jobConfigs.toMap
 }

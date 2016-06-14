@@ -55,11 +55,18 @@ trait JobDAO {
   def saveJobInfo(jobInfo: JobInfo)
 
   /**
+   * Return job info for a specific job id.
+   *
+   * @return
+   */
+  def getJobInfo(jobId: String): Option[JobInfo]
+
+  /**
    * Return all job ids to their job info.
    *
    * @return
    */
-  def getJobInfos: Map[String, JobInfo]
+  def getJobInfos(limit: Int): Seq[JobInfo]
 
   /**
    * Persist a job configuration along with provided jobId.
@@ -82,14 +89,4 @@ trait JobDAO {
    */
   def getLastUploadTime(appName: String): Option[DateTime] =
     getApps.get(appName)
-
-  /**
-   * A safe API for getting values from Typesafe Config, will return a default if the
-   * value is missing.  If the value is badly formatted, error still goes through.
-   */
-  def getOrElse[T](getter: => T, default: T): T = {
-    try getter catch {
-      case e: ConfigException.Missing => default
-    }
-  }
 }

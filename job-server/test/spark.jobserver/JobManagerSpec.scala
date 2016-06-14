@@ -1,190 +1,146 @@
 package spark.jobserver
 
-import akka.actor.{ActorSystem, ActorRef}
-import akka.testkit.ImplicitSender
-import akka.testkit.TestKit
-import com.typesafe.config.ConfigFactory
-import spark.jobserver.io.JobDAO
-import org.joda.time.DateTime
 import scala.collection.mutable
-import org.scalatest.{BeforeAndAfter, BeforeAndAfterAll, FunSpecLike, Matchers}
 
-object JobManagerSpec {
-  import collection.JavaConverters._
+import com.typesafe.config.ConfigFactory
+import spark.jobserver.JobManagerActor.KillJob
 
-  val JobResultCacheSize = 30
-  val NumCpuCores = Runtime.getRuntime.availableProcessors()  // number of cores to allocate. Required.
-  val MemoryPerNode = "512m"  // Executor memory per node, -Xmx style eg 512m, 1G, etc.
-  val MaxJobsPerContext = 2
-  val config = {
-    val ConfigMap = Map(
-      "spark.jobserver.job-result-cache-size" -> JobResultCacheSize,
-      "num-cpu-cores" -> NumCpuCores,
-      "memory-per-node" -> MemoryPerNode,
-      "spark.jobserver.max-jobs-per-context" -> MaxJobsPerContext,
-      "akka.log-dead-letters" -> 0,
-      "spark.master" -> "local[4]",
-      "spark.jobserver.context-factory" -> "spark.jobserver.util.DefaultSparkContextFactory"
-    )
-    ConfigFactory.parseMap(ConfigMap.asJava)
-  }
+object JobManagerSpec extends JobSpecConfig
 
-  def getNewSystem = ActorSystem("test", config)
-}
-
-abstract class JobManagerSpec extends TestKit(JobManagerSpec.getNewSystem) with ImplicitSender
-with FunSpecLike with Matchers with BeforeAndAfter with BeforeAndAfterAll with TestJarFinder {
-
+abstract class JobManagerSpec extends JobSpecBase(JobManagerSpec.getNewSystem) {
   import scala.concurrent.duration._
+
   import CommonMessages._
   import JobManagerSpec.MaxJobsPerContext
-
-  var dao: JobDAO = _
-  var manager: ActorRef = _
-
-  after {
-    ooyala.common.akka.AkkaTestUtils.shutdownAndWait(manager)
-  }
-
-  override def afterAll() {
-    ooyala.common.akka.AkkaTestUtils.shutdownAndWait(system)
-  }
-
-  private def uploadJar(dao: JobDAO, jarFilePath: String, appName: String) {
-    val bytes = scala.io.Source.fromFile(jarFilePath, "ISO-8859-1").map(_.toByte).toArray
-    dao.saveJar(appName, DateTime.now, bytes)
-  }
-
-  protected def uploadTestJar(appName: String = "demo") { uploadJar(dao, testJar.getAbsolutePath, appName) }
+  import akka.testkit._
 
   val classPrefix = "spark.jobserver."
   private val wordCountClass = classPrefix + "WordCountExample"
   protected val stringConfig = ConfigFactory.parseString("input.string = The lazy dog jumped over the fish")
   protected val emptyConfig = ConfigFactory.parseString("spark.master = bar")
 
+  val initMsgWait = 10.seconds.dilated
+  val startJobWait = 5.seconds.dilated
+
   describe("error conditions") {
     it("should return errors if appName does not match") {
       uploadTestJar()
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
       manager ! JobManagerActor.StartJob("demo2", wordCountClass, emptyConfig, Set.empty[Class[_]])
-      expectMsg(CommonMessages.NoSuchApplication)
+      expectMsg(startJobWait, CommonMessages.NoSuchApplication)
     }
 
     it("should return error message if classPath does not match") {
       uploadTestJar()
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
       manager ! JobManagerActor.StartJob("demo", "no.such.class", emptyConfig, Set.empty[Class[_]])
-      expectMsg(CommonMessages.NoSuchClass)
+      expectMsg(startJobWait, CommonMessages.NoSuchClass)
     }
 
     it("should error out if loading garbage jar") {
-      uploadJar(dao, "README.md", "notajar")
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      uploadJar(dao, "../README.md", "notajar")
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
       manager ! JobManagerActor.StartJob("notajar", "no.such.class", emptyConfig, Set.empty[Class[_]])
-      expectMsg(CommonMessages.NoSuchClass)
+      expectMsg(startJobWait, CommonMessages.NoSuchClass)
     }
 
     it("should error out if job validation fails") {
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
       manager ! JobManagerActor.StartJob("demo", wordCountClass, emptyConfig, allEvents)
-      expectMsgClass(classOf[CommonMessages.JobValidationFailed])
+      expectMsgClass(startJobWait, classOf[CommonMessages.JobValidationFailed])
       expectNoMsg()
     }
   }
 
-  val errorEvents: Set[Class[_]] = Set(classOf[JobErroredOut], classOf[JobValidationFailed],
-    classOf[NoJobSlotsAvailable])
-  val asyncEvents = Set(classOf[JobStarted])
-  val syncEvents = Set(classOf[JobResult])
-  val allEvents = errorEvents ++ asyncEvents ++ syncEvents ++ Set(classOf[JobFinished])
-
   describe("starting jobs") {
     it("should start job and return result successfully (all events)") {
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
       manager ! JobManagerActor.StartJob("demo", wordCountClass, stringConfig, allEvents)
-      expectMsgClass(classOf[JobStarted])
+      expectMsgClass(startJobWait, classOf[JobStarted])
       expectMsgAllClassOf(classOf[JobFinished], classOf[JobResult])
       expectNoMsg()
     }
 
     it("should start job more than one time and return result successfully (all events)") {
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
       manager ! JobManagerActor.StartJob("demo", wordCountClass, stringConfig, allEvents)
-      expectMsgClass(classOf[JobStarted])
+      expectMsgClass(startJobWait, classOf[JobStarted])
       expectMsgAllClassOf(classOf[JobFinished], classOf[JobResult])
       expectNoMsg()
 
       // should be ok to run the same more again
       manager ! JobManagerActor.StartJob("demo", wordCountClass, stringConfig, allEvents)
-      expectMsgClass(classOf[JobStarted])
+      expectMsgClass(startJobWait, classOf[JobStarted])
       expectMsgAllClassOf(classOf[JobFinished], classOf[JobResult])
       expectNoMsg()
     }
 
     it("should start job and return results (sync route)") {
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
       manager ! JobManagerActor.StartJob("demo", wordCountClass, stringConfig, syncEvents ++ errorEvents)
-      expectMsgPF(3 seconds, "Did not get JobResult") {
-        case JobResult(_, result: Map[String, Int]) => println("I got results! " + result)
+      expectMsgPF(startJobWait, "Did not get JobResult") {
+        case JobResult(_, result) => println("I got results! " + result)
       }
       expectNoMsg()
     }
 
     it("should start job and return JobStarted (async)") {
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
       manager ! JobManagerActor.StartJob("demo", wordCountClass, stringConfig, errorEvents ++ asyncEvents)
-      expectMsgClass(classOf[JobStarted])
+      expectMsgClass(startJobWait, classOf[JobStarted])
       expectNoMsg()
     }
 
     it("should return error if job throws an error") {
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
       manager ! JobManagerActor.StartJob("demo", classPrefix + "MyErrorJob", emptyConfig, errorEvents)
-      val errorMsg = expectMsgClass(classOf[JobErroredOut])
-      errorMsg.err.getClass should equal (classOf[IllegalArgumentException])
+      val errorMsg = expectMsgClass(startJobWait, classOf[JobErroredOut])
+      errorMsg.err.getClass should equal (classOf[RuntimeException])
     }
 
     it("job should get jobConfig passed in to StartJob message") {
       val jobConfig = ConfigFactory.parseString("foo.bar.baz = 3")
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
       manager ! JobManagerActor.StartJob("demo", classPrefix + "ConfigCheckerJob", jobConfig,
         syncEvents ++ errorEvents)
-      expectMsgPF(3 seconds, "Did not get JobResult") {
-        case JobResult(_, keys: Seq[String]) =>
+      expectMsgPF(startJobWait, "Did not get JobResult") {
+        case JobResult(_, keys: Seq[_]) =>
           keys should contain ("foo")
       }
     }
 
     it("should properly serialize case classes and other job jar classes") {
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
       manager ! JobManagerActor.StartJob("demo", classPrefix + "ZookeeperJob", stringConfig,
         syncEvents ++ errorEvents)
-      expectMsgPF(4 seconds, "Did not get JobResult") {
+      expectMsgPF(5.seconds.dilated, "Did not get JobResult") {
         case JobResult(_, result: Array[Product]) =>
           result.length should equal (1)
           result(0).getClass.getName should include ("Animal")
@@ -196,8 +152,8 @@ with FunSpecLike with Matchers with BeforeAndAfter with BeforeAndAfterAll with T
       val jobSleepTimeMillis = 2000L
       val jobConfig = ConfigFactory.parseString("sleep.time.millis = " + jobSleepTimeMillis)
 
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
 
@@ -208,7 +164,7 @@ with FunSpecLike with Matchers with BeforeAndAfter with BeforeAndAfterAll with T
       }
 
       while (messageCounts.values.sum < (MaxJobsPerContext * 3 + 1)) {
-        expectMsgPF(3 seconds, "Expected a message but didn't get one!") {
+        expectMsgPF(5.seconds.dilated, "Expected a message but didn't get one!") {
           case started: JobStarted =>
             messageCounts(started.getClass) += 1
           case noSlots: NoJobSlotsAvailable =>
@@ -228,15 +184,67 @@ with FunSpecLike with Matchers with BeforeAndAfter with BeforeAndAfterAll with T
     }
 
     it("should start a job that's an object rather than class") {
-      manager ! JobManagerActor.Initialize
-      expectMsgClass(classOf[JobManagerActor.Initialized])
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
 
       uploadTestJar()
       manager ! JobManagerActor.StartJob("demo", classPrefix + "SimpleObjectJob", emptyConfig,
         syncEvents ++ errorEvents)
-      expectMsgPF(3 seconds, "Did not get JobResult") {
+      expectMsgPF(5.seconds.dilated, "Did not get JobResult") {
         case JobResult(_, result: Int) => result should equal (1 + 2 + 3)
       }
     }
+
+    it("should be able to cancel running job") {
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
+
+      uploadTestJar()
+      manager ! JobManagerActor.StartJob("demo", classPrefix + "LongPiJob", stringConfig, allEvents)
+      expectMsgPF(5.seconds.dilated, "Did not get JobResult") {
+        case JobStarted(id, _, _) =>
+          manager ! KillJob(id)
+          expectMsgClass(classOf[JobKilled])
+
+      }
+    }
+
+    it("should be able to start a job with job jar dependencies and return results"){
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
+
+
+      uploadTestJar()
+      val jobJarDepsConfigs = ConfigFactory.parseString(
+        s"""
+          |dependent-jar-uris = ["file://$getExtrasJarPath"]
+        """.stripMargin
+      )
+
+      manager ! JobManagerActor.StartJob("demo", classPrefix + "jobJarDependenciesJob", jobJarDepsConfigs,
+        syncEvents ++ errorEvents)
+      expectMsgPF(startJobWait, "Did not get JobResult") {
+        case JobResult(_, result) => println("I got results! " + result)
+      }
+      expectNoMsg()
+    }
+
+    it("should fail a job that requires job jar dependencies but doesn't provide the jar"){
+      manager ! JobManagerActor.Initialize(daoActor, None)
+      expectMsgClass(initMsgWait, classOf[JobManagerActor.Initialized])
+
+
+      uploadTestJar()
+      val jobJarDepsConfigs = ConfigFactory.parseString(
+        s"""
+           |dependent-jar-uris = []
+        """.stripMargin)
+
+      manager ! JobManagerActor.StartJob("demo", classPrefix + "jobJarDependenciesJob", jobJarDepsConfigs,
+        syncEvents ++ errorEvents)
+
+      expectMsgClass(startJobWait, classOf[JobErroredOut])
+    }
+
   }
 }

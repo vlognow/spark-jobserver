@@ -8,7 +8,7 @@ sealed trait SparkJobValidation {
   // instead, which worked fine with tests but when run with the job-server
   // it would just hang and timeout. This is something worth investigating
   def &&(sparkValidation: SparkJobValidation): SparkJobValidation = this match {
-    case SparkJobValid =>  sparkValidation
+    case SparkJobValid => sparkValidation
     case x => x
   }
 }
@@ -18,16 +18,18 @@ case class SparkJobInvalid(reason: String) extends SparkJobValidation
 /**
  *  This trait is the main API for Spark jobs submitted to the Job Server.
  */
-trait SparkJob {
+trait SparkJobBase {
+  type C
+
   /**
    * This is the entry point for a Spark Job Server to execute Spark jobs.
    * This function should create or reuse RDDs and return the result at the end, which the
    * Job Server will cache or display.
-   * @param sc a SparkContext for the job.  May be reused across jobs.
+   * @param sc a SparkContext or similar for the job.  May be reused across jobs.
    * @param jobConfig the Typesafe Config object passed into the job request
    * @return the job result
    */
-  def runJob(sc: SparkContext, jobConfig: Config): Any
+  def runJob(sc: C, jobConfig: Config): Any
 
   /**
    * This method is called by the job server to allow jobs to validate their input and reject
@@ -37,5 +39,9 @@ trait SparkJob {
    * trying to start this job.
    * @return either SparkJobValid or SparkJobInvalid
    */
-  def validate(sc: SparkContext, config: Config): SparkJobValidation
+  def validate(sc: C, config: Config): SparkJobValidation
+}
+
+trait SparkJob extends SparkJobBase {
+  type C = SparkContext
 }

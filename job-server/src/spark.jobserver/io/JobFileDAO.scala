@@ -16,8 +16,7 @@ class JobFileDAO(config: Config) extends JobDAO {
   // jobId to its Config
   private val configs = mutable.HashMap.empty[String, Config]
 
-  private val rootDir = getOrElse(config.getString("spark.jobserver.filedao.rootdir"),
-    "/tmp/spark-jobserver/filedao/data")
+  private val rootDir = config.getString("spark.jobserver.filedao.rootdir")
   private val rootDirFile = new File(rootDir)
   logger.info("rootDir is " + rootDirFile.getAbsolutePath)
 
@@ -135,7 +134,8 @@ class JobFileDAO(config: Config) extends JobDAO {
   override def retrieveJarFile(appName: String, uploadTime: DateTime): String =
     new File(rootDir, createJarName(appName, uploadTime) + ".jar").getAbsolutePath
 
-  private def createJarName(appName: String, uploadTime: DateTime): String = appName + "-" + uploadTime.toString().replace(':', '_')
+  private def createJarName(appName: String, uploadTime: DateTime): String =
+    appName + "-" + uploadTime.toString().replace(':', '_')
 
   override def saveJobInfo(jobInfo: JobInfo) {
     writeJobInfo(jobsOutputStream, jobInfo)
@@ -168,7 +168,10 @@ class JobFileDAO(config: Config) extends JobDAO {
     Some(new DateTime(in.readLong)),
     readError(in))
 
-  override def getJobInfos: Map[String, JobInfo] = jobs.toMap
+  override def getJobInfo(jobId: String): Option[JobInfo] = jobs.get(jobId)
+
+  override def getJobInfos(limit: Int): Seq[JobInfo] =
+    jobs.values.toSeq.sortBy(- _.startTime.getMillis).take(limit)
 
   override def saveJobConfig(jobId: String, jobConfig: Config) {
     writeJobConfig(jobConfigsOutputStream, jobId, jobConfig)

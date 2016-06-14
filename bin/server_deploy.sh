@@ -18,21 +18,34 @@ if [ ! -f "$configFile" ]; then
   echo "Could not find $configFile"
   exit 1
 fi
-. $configFile
+. "$configFile"
+
+majorRegex='([0-9]+\.[0-9]+)\.[0-9]+'
+if [[ $SCALA_VERSION =~ $majorRegex ]]
+then
+  majorVersion="${BASH_REMATCH[1]}"
+else
+  echo "Please specify SCALA_VERSION in ${configFile}"
+  exit 1
+fi
 
 echo Deploying job server to $DEPLOY_HOSTS...
 
 cd $(dirname $0)/..
-sbt job-server/assembly
+sbt ++$SCALA_VERSION job-server-extras/assembly
 if [ "$?" != "0" ]; then
   echo "Assembly failed"
   exit 1
 fi
 
-FILES="job-server/target/spark-job-server.jar
+FILES="job-server-extras/target/scala-$majorVersion/spark-job-server.jar
        bin/server_start.sh
        bin/server_stop.sh
+       bin/kill-process-tree.sh
+       bin/manager_start.sh
+       bin/setenv.sh
        $CONFIG_DIR/$ENV.conf
+  	   config/shiro.ini
        config/log4j-server.properties"
 
 ssh_key_to_use=""
@@ -42,7 +55,9 @@ fi
 
 for host in $DEPLOY_HOSTS; do
   # We assume that the deploy user is APP_USER and has permissions
-  ssh $ssh_key_to_use  ${APP_USER}@$host mkdir -p $INSTALL_DIR
-  scp $ssh_key_to_use  $FILES ${APP_USER}@$host:$INSTALL_DIR/
-  scp $ssh_key_to_use  $configFile ${APP_USER}@$host:$INSTALL_DIR/settings.sh
+  ssh -o StrictHostKeyChecking=no $ssh_key_to_use  ${APP_USER}@$host mkdir -p $INSTALL_DIR
+  scp -o StrictHostKeyChecking=no $ssh_key_to_use  $FILES ${APP_USER}@$host:$INSTALL_DIR/
+  scp -o StrictHostKeyChecking=no $ssh_key_to_use  "$CONFIG_DIR/$ENV.conf" ${APP_USER}@$host:$INSTALL_DIR/
+  scp -o StrictHostKeyChecking=no $ssh_key_to_use  "$configFile" ${APP_USER}@$host:$INSTALL_DIR/settings.sh
 done
+

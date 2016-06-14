@@ -13,6 +13,12 @@ object SparkJobUtils {
   import collection.JavaConverters._
 
   /**
+   * User impersonation for an already Kerberos authenticated user is supported via the
+   * `spark.proxy.user` query param
+   */
+  val SPARK_PROXY_USER_PARAM = "spark.proxy.user"
+
+  /**
    * Creates a SparkConf for initializing a SparkContext based on various configs.
    * Note that anything in contextConfig with keys beginning with spark. get
    * put directly in the SparkConf.
@@ -25,9 +31,13 @@ object SparkJobUtils {
    */
   def configToSparkConf(config: Config, contextConfig: Config,
                         contextName: String): SparkConf = {
+
+    val sparkMaster = SparkMasterProvider.fromConfig(config).getSparkMaster(config)
+
     val conf = new SparkConf()
-    conf.setMaster(config.getString("spark.master"))
-        .setAppName(contextName)
+    conf
+      .setMaster(sparkMaster)
+      .setAppName(contextName)
 
     for (cores <- Try(contextConfig.getInt("num-cpu-cores"))) {
       conf.set("spark.cores.max", cores.toString)
@@ -43,8 +53,9 @@ object SparkJobUtils {
     conf.set("spark.ui.port", "0")
 
     // Set spark broadcast factory in yarn-client mode
-    if (config.getString("spark.master") == "yarn-client")
+    if (sparkMaster == "yarn-client") {
       conf.set("spark.broadcast.factory", config.getString("spark.jobserver.yarn-broadcast-factory"))
+    }
 
     // Set number of akka threads
     // TODO: need to figure out how many extra threads spark needs, besides the job threads
@@ -71,6 +82,17 @@ object SparkJobUtils {
   }
 
   /**
+    *
+    * @param config the specific context configuration
+    * @return a map of the hadoop configuration values or an empty Map
+    */
+  def getHadoopConfig(config: Config): Map[String, String] = {
+    Try(config.getConfig("hadoop").entrySet().asScala.map { e =>
+      e.getKey -> e.getValue.unwrapped().toString
+    }.toMap).getOrElse(Map())
+  }
+
+  /**
    * Returns the maximum number of jobs that can run at the same time
    */
   def getMaxRunningJobs(config: Config): Int = {
@@ -84,9 +106,11 @@ object SparkJobUtils {
   def getContextTimeout(config: Config): Int = {
     config.getString("spark.master") match {
       case "yarn-client" =>
-        Try(config.getDuration("spark.jobserver.yarn-context-creation-timeout", TimeUnit.MILLISECONDS).toInt / 1000).getOrElse(40)
+        Try(config.getDuration("spark.jobserver.yarn-context-creation-timeout",
+              TimeUnit.MILLISECONDS).toInt / 1000).getOrElse(40)
       case _               =>
-        Try(config.getDuration("spark.jobserver.context-creation-timeout", TimeUnit.MILLISECONDS).toInt / 1000).getOrElse(15)
+        Try(config.getDuration("spark.jobserver.context-creation-timeout",
+              TimeUnit.MILLISECONDS).toInt / 1000).getOrElse(15)
     }
   }
 }

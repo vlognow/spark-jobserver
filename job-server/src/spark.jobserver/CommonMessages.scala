@@ -14,6 +14,7 @@ object CommonMessages {
   case class JobFinished(jobId: String, endTime: DateTime) extends StatusMessage
   case class JobValidationFailed(jobId: String, endTime: DateTime, err: Throwable) extends StatusMessage
   case class JobErroredOut(jobId: String, endTime: DateTime, err: Throwable) extends StatusMessage
+  case class JobKilled(jobId: String, endTime: DateTime) extends StatusMessage
 
   /**
    * NOTE: For Subscribe, make sure to use `classOf[]` to get the Class for the case classes above.
@@ -31,6 +32,7 @@ object CommonMessages {
   case object NoSuchJobId
   case object NoSuchApplication
   case object NoSuchClass
+  case object WrongJobType      // Job type C does not match context type
   case object JobInitAlready
   case class NoJobSlotsAvailable(maxJobSlots: Int) // TODO: maybe rename this
 }
